@@ -1,4 +1,5 @@
 /rtnl-addr-add
+/rtnl-addr-add-del
 /rtnl-link-dump
 /rtnl-link-dump2
 /rtnl-link-dump3
