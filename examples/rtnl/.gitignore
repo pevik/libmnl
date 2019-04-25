@@ -5,4 +5,5 @@
 /rtnl-link-event
 /rtnl-link-set
 /rtnl-route-add
+/rtnl-route-add-del
 /rtnl-route-dump

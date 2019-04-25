@@ -5,7 +5,7 @@ check_PROGRAMS = rtnl-addr-add \
 		 rtnl-link-dump rtnl-link-dump2 rtnl-link-dump3 \
 		 rtnl-link-event \
 		 rtnl-link-set \
-		 rtnl-route-add \
+		 rtnl-route-add rtnl-route-add-del \
 		 rtnl-route-dump \
 		 rtnl-route-event \
 		 rtnl-neigh-dump
@@ -27,6 +27,9 @@ rtnl_link_dump3_LDADD = ../../src/libmnl.la
 
 rtnl_route_add_SOURCES = rtnl-route-add.c
 rtnl_route_add_LDADD = ../../src/libmnl.la
+
+rtnl_route_add_del_SOURCES = rtnl-route-add-del.c
+rtnl_route_add_del_LDADD = ../../src/libmnl.la
 
 rtnl_link_event_SOURCES = rtnl-link-event.c
 rtnl_link_event_LDADD = ../../src/libmnl.la
