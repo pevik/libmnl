@@ -5,43 +5,26 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <string.h>
 #include <strings.h>
 #include <net/if.h>
+#include <netdb.h>
 
 #include <libmnl/libmnl.h>
 #include <linux/if_link.h>
 #include <linux/rtnetlink.h>
 
-static void rtnl_route(int iface, char *cdst, uint32_t prefix, char *cgw, int type)
+static void rtnl_route(int iface, struct addrinfo *dst, struct addrinfo *gw, uint32_t prefix, int type)
 {
-	union {
-		in_addr_t ip;
-		struct in6_addr ip6;
-	} dst;
-	union {
-		in_addr_t ip;
-		struct in6_addr ip6;
-	} gw;
-
 	struct mnl_socket *nl;
 	char buf[MNL_SOCKET_BUFFER_SIZE];
 	struct nlmsghdr *nlh;
 	struct rtmsg *rtm;
 	uint32_t seq, portid;
-	int ret, family = AF_INET;
+	int ret, family = dst->ai_family;
 
-	if (!inet_pton(AF_INET, cdst, &dst)) {
-		if (!inet_pton(AF_INET6, cdst, &dst)) {
-			perror("inet_pton");
-			exit(EXIT_FAILURE);
-		}
-		family = AF_INET6;
-	}
-
-	if (cgw && !inet_pton(family, cgw, &gw)) {
-		perror("inet_pton");
-		exit(EXIT_FAILURE);
-	}
+	struct in6_addr dst_in6, gw_in6;
+	in_addr_t dst_ip, gw_ip;
 
 	nlh = mnl_nlmsg_put_header(buf);
 	nlh->nlmsg_type	= type; // RTM_NEWROUTE or RTM_DELROUTE
@@ -58,22 +41,47 @@ static void rtnl_route(int iface, char *cdst, uint32_t prefix, char *cgw, int ty
 	rtm->rtm_table = RT_TABLE_MAIN;
 	rtm->rtm_type = RTN_UNICAST;
 	/* is there any gateway? */
-	rtm->rtm_scope = (cgw) ? RT_SCOPE_UNIVERSE : RT_SCOPE_LINK;
+	rtm->rtm_scope = gw ? RT_SCOPE_UNIVERSE : RT_SCOPE_LINK;
 	rtm->rtm_flags = 0;
 
-	if (family == AF_INET)
-		mnl_attr_put_u32(nlh, RTA_DST, dst.ip);
-	else
-		mnl_attr_put(nlh, RTA_DST, sizeof(struct in6_addr), &dst);
+	char dst_str[INET6_ADDRSTRLEN];
+	if (family == AF_INET6) {
+		dst_in6 = ((struct sockaddr_in6 *)dst->ai_addr)->sin6_addr;
+		if (!inet_ntop(AF_INET6, &dst_in6, dst_str, sizeof(dst_str))) {
+			perror("inet_ntop IPv6 dst failed");
+			exit(EXIT_FAILURE);
+		}
+		mnl_attr_put(nlh, RTA_DST, sizeof(struct in6_addr), &dst_in6);
+	} else {
+		dst_ip = ((struct sockaddr_in *)dst->ai_addr)->sin_addr.s_addr;
+		if (!inet_ntop(AF_INET, &dst_ip, dst_str, sizeof(dst_str))) {
+			perror("inet_ntop IPv4 dst failed");
+			exit(EXIT_FAILURE);
+		}
+		mnl_attr_put_u32(nlh, RTA_DST, dst_ip);
+	}
+	printf("%s:%d dst check: '%s'\n", __func__, __LINE__, dst_str);
 
 	mnl_attr_put_u32(nlh, RTA_OIF, iface);
-	if (cgw) {
-		if (family == AF_INET)
-			mnl_attr_put_u32(nlh, RTA_GATEWAY, gw.ip);
-		else {
-			mnl_attr_put(nlh, RTA_GATEWAY, sizeof(struct in6_addr),
-					&gw.ip6);
+
+	if (gw) {
+		char gw_str[INET6_ADDRSTRLEN];
+		if (family == AF_INET6) {
+			gw_in6 = ((struct sockaddr_in6 *)gw->ai_addr)->sin6_addr;
+			if (!inet_ntop(AF_INET6, &gw_in6, gw_str, sizeof(gw_str))) {
+				perror("inet_ntop IPv6 gw failed");
+				exit(EXIT_FAILURE);
+			}
+			mnl_attr_put(nlh, RTA_GATEWAY, sizeof(struct in6_addr), &gw_in6);
+		} else {
+			gw_ip = ((struct sockaddr_in *)gw->ai_addr)->sin_addr.s_addr;
+			mnl_attr_put_u32(nlh, RTA_GATEWAY, gw_ip);
+			if (!inet_ntop(AF_INET, &gw_ip, gw_str, sizeof(gw_str))) {
+				perror("inet_ntop IPv4 gw failed");
+				exit(EXIT_FAILURE);
+			}
 		}
+		printf("%s:%d gw check: '%s'\n", __func__, __LINE__, gw_str);
 	}
 
 	nl = mnl_socket_open(NETLINK_ROUTE);
@@ -110,8 +118,10 @@ static void rtnl_route(int iface, char *cdst, uint32_t prefix, char *cgw, int ty
 
 int main(int argc, char *argv[])
 {
-	uint32_t prefix;
+	int family = AF_INET;
 	int iface;
+	uint32_t prefix;
+	struct addrinfo hints, *dst, *gw;
 
 	if (argc <= 3) {
 		printf("Usage: %s iface destination cidr [gateway]\n", argv[0]);
@@ -131,8 +141,74 @@ int main(int argc, char *argv[])
 		exit(EXIT_FAILURE);
 	}
 
-	rtnl_route(iface, argv[2], prefix, argc == 5 ? argv[4] : NULL, RTM_NEWROUTE);
-	rtnl_route(iface, argv[2], prefix, argc == 5 ? argv[4] : NULL, RTM_DELROUTE);
+	if (strchr(argv[2], ':'))
+		family = AF_INET6;
+
+	memset(&hints, 0, sizeof(struct addrinfo));
+	hints.ai_family = family;
+	hints.ai_socktype = SOCK_DGRAM;
+	hints.ai_flags = 0;
+	hints.ai_protocol = 0;
+	hints.ai_addr = INADDR_ANY;
+
+	/* destination */
+	if (getaddrinfo(argv[2], NULL, &hints, &dst)) {
+		perror("getaddrinfo (dst)");
+		exit(EXIT_FAILURE);
+	}
+
+	if (!dst) {
+		perror("failed to get dst address");
+		exit(EXIT_FAILURE);
+	}
+
+	char dst_str[INET6_ADDRSTRLEN];
+	if (family == AF_INET6) {
+		struct in6_addr dst_in6 = ((struct sockaddr_in6 *)dst->ai_addr)->sin6_addr;
+		if (!inet_ntop(AF_INET6, &dst_in6, dst_str, sizeof(dst_str))) {
+			perror("inet_ntop IPv6 dst failed");
+			exit(EXIT_FAILURE);
+		}
+	} else {
+		in_addr_t dst_ip = ((struct sockaddr_in *)dst->ai_addr)->sin_addr.s_addr;
+		if (!inet_ntop(AF_INET, &dst_ip, dst_str, sizeof(dst_str))) {
+			perror("inet_ntop IPv4 dst failed");
+			exit(EXIT_FAILURE);
+		}
+	}
+	printf("%s:%d dst check: '%s'\n", __func__, __LINE__, dst_str);
+
+	/* gateway */
+	if (argc == 5) {
+		if (getaddrinfo(argv[4], NULL, &hints, &gw)) {
+			perror("getaddrinfo (gw)");
+			exit(EXIT_FAILURE);
+		}
+
+		if (!gw) {
+			perror("failed to get gw address");
+			exit(EXIT_FAILURE);
+		}
+
+		char gw_str[INET6_ADDRSTRLEN];
+		if (family == AF_INET6) {
+			struct in6_addr gw_in6 = ((struct sockaddr_in6 *)gw->ai_addr)->sin6_addr;
+			if (!inet_ntop(AF_INET6, &gw_in6, gw_str, sizeof(gw_str))) {
+				perror("inet_ntop IPv6 gw failed");
+				exit(EXIT_FAILURE);
+			}
+		} else {
+			in_addr_t gw_ip = ((struct sockaddr_in *)gw->ai_addr)->sin_addr.s_addr;
+			if (!inet_ntop(AF_INET, &gw_ip, gw_str, sizeof(gw_str))) {
+				perror("inet_ntop IPv4 gw failed");
+				exit(EXIT_FAILURE);
+			}
+		}
+		printf("%s:%d gw check: '%s'\n", __func__, __LINE__, gw_str);
+	}
+
+	rtnl_route(iface, dst, argc == 5 ? gw : NULL, prefix, RTM_NEWROUTE);
+	rtnl_route(iface, dst, argc == 5 ? gw : NULL, prefix, RTM_DELROUTE);
 
 	return 0;
 }
